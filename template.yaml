@@ -23,7 +23,7 @@ Resources:
         Variables:
           DOCTORS_TABLE: !Ref DoctorsTable
           PROFILE_PICTURE_BUCKET: !Ref ProfilePictureBucket
-          JWT_SECRET: "dummyJWTsecret123!@#" # Replace with a secure secret in production
+          JWT_SECRET: "secretCat7lives" # Replace with a secure secret in production
       Events:
         ApiEvent:
           Type: Api
