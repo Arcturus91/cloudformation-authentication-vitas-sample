@@ -1,0 +1,99 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Vitas Authentication App
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: nodejs20.x
+
+Resources:
+  VitasAuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Vitas Authentication lambda
+      CodeUri: ./
+      Handler: src/main.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DoctorsTable
+        - S3CrudPolicy:
+            BucketName: !Ref ProfilePictureBucket
+      Environment:
+        Variables:
+          DOCTORS_TABLE: !Ref DoctorsTable
+          PROFILE_PICTURE_BUCKET: !Ref ProfilePictureBucket
+          JWT_SECRET: "dummyJWTsecret123!@#" # Replace with a secure secret in production
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ServerlessRestApi
+            Path: /{proxy+}
+            Method: ANY
+            Auth:
+              ApiKeyRequired: true
+
+  DoctorsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: vitas_doctors_table
+      AttributeDefinitions:
+        - AttributeName: doctor_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: doctor_id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+
+  ProfilePictureBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: vitas-profile-pictures
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ApiGatewayApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn:
+      - ServerlessRestApi
+      - ServerlessRestApiProdStage
+    Properties:
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Ref ServerlessRestApi
+          StageName: Prod
+
+  ApiGatewayUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn:
+      - ServerlessRestApi
+      - ServerlessRestApiProdStage
+    Properties:
+      ApiStages:
+        - ApiId: !Ref ServerlessRestApi
+          Stage: Prod
+      UsagePlanName: VitasUsagePlan
+
+  ApiGatewayUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    DependsOn:
+      - ApiGatewayApiKey
+      - ApiGatewayUsagePlan
+    Properties:
+      KeyId: !Ref ApiGatewayApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref ApiGatewayUsagePlan
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+  ApiKey:
+    Description: API Key for authentication
+    Value: !Ref ApiGatewayApiKey

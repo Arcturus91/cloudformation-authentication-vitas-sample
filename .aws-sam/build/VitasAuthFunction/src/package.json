@@ -1,0 +1,14 @@
+{
+    "name": "vitas-auth-app",
+    "version": "1.0.0",
+    "description": "Vitas Authentication App",
+    "main": "src/main.js",
+    "dependencies": {
+        "@aws-sdk/client-dynamodb": "^3.x.x",
+        "@aws-sdk/lib-dynamodb": "^3.x.x",
+        "@aws-sdk/client-s3": "^3.x.x",
+        "bcryptjs": "^2.4.3",
+        "jsonwebtoken": "^9.0.0",
+        "uuid": "^9.0.0"
+    }
+}
