@@ -1,48 +1,64 @@
-const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
-const {
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
   DynamoDBDocumentClient,
   PutCommand,
   GetCommand,
   UpdateCommand,
   DeleteCommand,
   QueryCommand,
-} = require("@aws-sdk/lib-dynamodb");
-const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
-const jwt = require("jsonwebtoken");
-const bcrypt = require("bcryptjs");
-const { v4: uuidv4 } = require("uuid");
+} from "@aws-sdk/lib-dynamodb";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import jwt from "jsonwebtoken";
+import bcrypt from "bcryptjs";
+import { v4 as uuidv4 } from "uuid";
+import { SNSClient, SubscribeCommand } from "@aws-sdk/client-sns";
 
 const ddbClient = new DynamoDBClient();
 const ddbDocClient = DynamoDBDocumentClient.from(ddbClient);
-const s3Client = new S3Client();
+
+const ROUTES = {
+  SIGN_UP: "/signup",
+  SIGN_IN: "/signin",
+  ACCOUNT: "/account",
+  PASSWORD: "/password",
+  PROFILE_PICTURE: "/profile-picture",
+};
+
+const HTTP_METHODS = {
+  GET: "GET",
+  POST: "POST",
+  PUT: "PUT",
+  DELETE: "DELETE",
+};
 
 const DOCTORS_TABLE = process.env.DOCTORS_TABLE;
 const PROFILE_PICTURE_BUCKET = process.env.PROFILE_PICTURE_BUCKET;
 const JWT_SECRET = process.env.JWT_SECRET;
+const SNS_TOPIC_ARN = process.env.SNS_TOPIC_ARN;
 
-exports.handler = async (event) => {
+export const handler = async (event) => {
   try {
     const path = event.path;
     const method = event.httpMethod;
 
-    if (path === "/signup" && method === "POST") {
-      return await signUp(JSON.parse(event.body));
-    } else if (path === "/signin" && method === "POST") {
-      return await signIn(JSON.parse(event.body));
-    } else if (path === "/account" && method === "DELETE") {
-      return await deleteAccount(event);
-    } else if (path === "/account" && method === "PUT") {
-      return await updateUserData(event);
-    } else if (path === "/password" && method === "PUT") {
-      return await changePassword(event);
-    } else if (path === "/profile-picture" && method === "POST") {
-      return await uploadProfilePicture(event);
-    }
+    const route = `${path}:${method}`;
 
-    return {
-      statusCode: 404,
-      body: JSON.stringify({ message: "Not Found" }),
-    };
+    switch (route) {
+      case `${ROUTES.SIGN_UP}:${HTTP_METHODS.POST}`:
+        return await signUp(JSON.parse(event.body));
+      case `${ROUTES.SIGN_IN}:${HTTP_METHODS.POST}`:
+        return await signIn(JSON.parse(event.body));
+      case `${ROUTES.ACCOUNT}:${HTTP_METHODS.DELETE}`:
+        return await deleteAccount(event);
+      case `${ROUTES.ACCOUNT}:${HTTP_METHODS.PUT}`:
+        return await updateUserData(event);
+      case `${ROUTES.PASSWORD}:${HTTP_METHODS.PUT}`:
+        return await changePassword(event);
+      case `${ROUTES.PROFILE_PICTURE}:${HTTP_METHODS.POST}`:
+        return await uploadProfilePicture(event);
+      default:
+        throw new Error("Route not found");
+    }
   } catch (error) {
     console.error("Error:", error);
     return {
@@ -53,41 +69,97 @@ exports.handler = async (event) => {
 };
 
 async function signUp(userData) {
-  const hashedPassword = await bcrypt.hash(userData.password, 10);
-  const doctorId = uuidv4();
+  try {
+    // First, check if email already exists using the email-index
+    const checkEmailParams = {
+      TableName: DOCTORS_TABLE,
+      IndexName: "email-index",
+      KeyConditionExpression: "email = :email",
+      ExpressionAttributeValues: {
+        ":email": userData.email,
+      },
+      Select: "COUNT",
+    };
 
-  const params = {
-    TableName: DOCTORS_TABLE,
-    Item: {
-      doctor_id: doctorId,
-      password: hashedPassword,
-      full_name: userData.full_name,
-      date_of_birth: userData.date_of_birth,
-      id_number: userData.id_number,
-      gender: userData.gender,
-      address: userData.address,
-      phone_number: userData.phone_number,
-      profession: userData.profession,
-      specialty: userData.specialty,
-      peruvian_medical_code: userData.peruvian_medical_code,
-      profile_picture: null,
-      email: userData.email,
-    },
-  };
+    const emailCheck = await ddbDocClient.send(
+      new QueryCommand(checkEmailParams)
+    );
 
-  await ddbDocClient.send(new PutCommand(params));
+    if (emailCheck.Count > 0) {
+      return {
+        statusCode: 400,
+        body: JSON.stringify({
+          message: "Este email ya se encuentra registrado",
+        }),
+      };
+    }
 
-  const token = jwt.sign({ doctor_id: doctorId }, JWT_SECRET, {
-    expiresIn: "1h",
-  });
+    // If email is unique, proceed with user creation
+    const snsClient = new SNSClient();
+    const hashedPassword = await bcrypt.hash(userData.password, 10);
+    const doctorId = uuidv4();
 
-  return {
-    statusCode: 201,
-    body: JSON.stringify({ message: "User created successfully", token }),
-    headers: {
-      "Set-Cookie": `token=${token}; HttpOnly; Secure; SameSite=Strict; Max-Age=3600`,
-    },
-  };
+    // Create user in DynamoDB
+    const params = {
+      TableName: DOCTORS_TABLE,
+      Item: {
+        doctor_id: doctorId,
+        password: hashedPassword,
+        full_name: userData.full_name,
+        date_of_birth: userData.date_of_birth,
+        id_number: userData.id_number,
+        gender: userData.gender,
+        address: userData.address,
+        phone_number: userData.phone_number,
+        profession: userData.profession,
+        specialty: userData.specialty,
+        peruvian_medical_code: userData.peruvian_medical_code,
+        profile_picture: null,
+        email: userData.email,
+      },
+    };
+
+    await ddbDocClient.send(new PutCommand(params));
+
+    // Create SNS subscription for the user's email
+    try {
+      const subscribeCommand = new SubscribeCommand({
+        TopicArn: SNS_TOPIC_ARN,
+        Protocol: "email",
+        Endpoint: userData.email,
+        Attributes: {
+          FilterPolicy: JSON.stringify({
+            userType: ["doctor"],
+            doctorId: [doctorId],
+          }),
+        },
+      });
+
+      await snsClient.send(subscribeCommand);
+      console.log(`SNS subscription created for email: ${userData.email}`);
+    } catch (snsError) {
+      console.error("Error creating SNS subscription:", snsError);
+    }
+
+    const token = jwt.sign({ doctor_id: doctorId }, JWT_SECRET, {
+      expiresIn: "1h",
+    });
+
+    return {
+      statusCode: 201,
+      body: JSON.stringify({
+        message: "User created successfully!",
+        token,
+        subscriptionStatus: "Pending confirmation. Please check your email.",
+      }),
+      headers: {
+        "Set-Cookie": `token=${token}; HttpOnly; Secure; SameSite=Strict; Max-Age=3600`,
+      },
+    };
+  } catch (error) {
+    console.error("Error in signUp:", error);
+    throw error; // Let the main handler catch this
+  }
 }
 
 async function signIn(credentials) {
@@ -164,8 +236,8 @@ async function updateUserData(event) {
     };
 
   const updatedData = JSON.parse(event.body);
-  delete updatedData.doctor_id; // Prevent changing the doctor_id
-  delete updatedData.password; // Prevent changing the password through this endpoint
+  delete updatedData.doctor_id;
+  delete updatedData.password;
 
   const params = {
     TableName: DOCTORS_TABLE,
@@ -236,6 +308,7 @@ async function changePassword(event) {
 }
 
 async function uploadProfilePicture(event) {
+  const s3Client = new S3Client();
   const doctorId = verifyToken(event);
   if (!doctorId)
     return {
@@ -246,13 +319,13 @@ async function uploadProfilePicture(event) {
   const imageData = event.body; // Assume the image is sent as base64 in the request body
   const imageBuffer = Buffer.from(imageData, "base64");
 
-  const key = `${doctorId}/profile-picture.jpg`;
+  const key = `doctors/${doctorId}/profile-picture1.png`;
 
   const s3Params = {
     Bucket: PROFILE_PICTURE_BUCKET,
     Key: key,
     Body: imageBuffer,
-    ContentType: "image/jpeg",
+    ContentType: "image/png",
   };
 
   await s3Client.send(new PutObjectCommand(s3Params));
